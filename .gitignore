@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.DS_Store
+*.pyc
+
+artifacts/
+*.npy
+*.npz
+*.joblib
+
+data/spotify_songs.csv
+data/spotify_songs_en_clean.csv
+
+.vscode/
+.streamlit/
