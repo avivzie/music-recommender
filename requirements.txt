@@ -6,3 +6,4 @@ joblib
 sentence-transformers
 streamlit
 tqdm
+gensim
