@@ -1,6 +1,7 @@
 """Text cleaning + basic dataset filtering."""
 import re
 import pandas as pd
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 from src.config import RAW_CSV, CLEAN_CSV, COL_LANG, COL_LYRICS
 
 TAG_RE = re.compile(
@@ -16,7 +17,10 @@ def clean_lyrics(text: str) -> str:
     text = re.sub(r"http\S+|www\.\S+", " ", text)
     text = re.sub(r"[^a-z\s']", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    return text
+    if not text:
+        return ""
+    tokens = [t for t in text.split() if t not in ENGLISH_STOP_WORDS]
+    return " ".join(tokens)
 
 def main():
     df = pd.read_csv(RAW_CSV)
