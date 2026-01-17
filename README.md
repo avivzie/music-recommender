@@ -107,8 +107,8 @@ python3 -m src.evaluation --evaluate --models "SBERT_COSINE,TFIDF_COSINE,W2V_COS
 ```
 
 Results saved to:
-- `evaluation_results.csv` - Per-query results
-- `evaluation_ablations_summary.csv` - Feature impact analysis
+- `data/evaluation_results.csv` - Per-query results
+- `data/evaluation_ablations_summary.csv` - Feature impact analysis
 
 ### Evaluation Results (Sample)
 

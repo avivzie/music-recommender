@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.config import (
     CLEAN_CSV,
+    DATA_DIR,
     COL_GENRE,
     COL_SUBGENRE,
     COL_TRACK_NAME,
@@ -127,8 +128,8 @@ def make_queries(use_subgenre: bool = False, n_queries: int = 8, seeds_per_query
         seeds_per_query=seeds_per_query,
         ground_truth=ground_truth
     )
-    out.to_csv("evaluation_queries.csv", index=False)
-    print("Wrote evaluation_queries.csv")
+    out.to_csv(DATA_DIR / "evaluation_queries.csv", index=False)
+    print("Wrote data/evaluation_queries.csv")
 
 def _precision_at_k(recs: list[int], relevant: set[int], k: int) -> float:
     # Fraction of top-K that are relevant.
@@ -372,14 +373,14 @@ def export_outliers(rec: Recommender, top_n: int = 50):
     df["outlier_score"] = rec.outlier_scores
     df["outlier_flag"] = rec.outlier_flags
     out = df.sort_values("outlier_score").head(top_n)
-    out.to_csv("outliers_top.csv", index=False)
-    print("Wrote outliers_top.csv")
+    out.to_csv(DATA_DIR / "outliers_top.csv", index=False)
+    print("Wrote data/outliers_top.csv")
 
 def export_clusters(rec: Recommender):
     df = rec.df.copy()
     df["audio_cluster"] = rec.audio_clusters
-    df.to_csv("audio_clusters.csv", index=False)
-    print("Wrote audio_clusters.csv")
+    df.to_csv(DATA_DIR / "audio_clusters.csv", index=False)
+    print("Wrote data/audio_clusters.csv")
 
 def export_assoc_rules(rec: Recommender, top_n: int = 200):
     rows = []
@@ -390,16 +391,16 @@ def export_assoc_rules(rec: Recommender, top_n: int = 200):
         print("No association rules found.")
         return
     df = pd.DataFrame(rows).sort_values("confidence", ascending=False).head(top_n)
-    df.to_csv("association_rules_top.csv", index=False)
-    print("Wrote association_rules_top.csv")
+    df.to_csv(DATA_DIR / "association_rules_top.csv", index=False)
+    print("Wrote data/association_rules_top.csv")
 
 def export_failure_cases(per_query: pd.DataFrame, top_n: int = 20):
     if per_query.empty:
         return
     cols = ["query_id", "model_type", "ndcg@K", "precision@K", "recall@K", "hit_rate@K", "n_relevant"]
     out = per_query.sort_values("ndcg@K").head(top_n)
-    out[cols].to_csv("evaluation_failures.csv", index=False)
-    print("Wrote evaluation_failures.csv")
+    out[cols].to_csv(DATA_DIR / "evaluation_failures.csv", index=False)
+    print("Wrote data/evaluation_failures.csv")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -487,16 +488,16 @@ def main():
         ]
         summary, per_query = evaluate_configs(rec, queries_df, cfgs, args.use_subgenre, ground_truth=queries_df.iloc[0]["ground_truth"])
         print(summary.to_string(index=False))
-        per_query.drop(columns=["rec_idxs"], errors="ignore").to_csv("evaluation_results.csv", index=False)
-        print("Wrote evaluation_results.csv")
+        per_query.drop(columns=["rec_idxs"], errors="ignore").to_csv(DATA_DIR / "evaluation_results.csv", index=False)
+        print("Wrote data/evaluation_results.csv")
         if args.export_failures:
             export_failure_cases(per_query)
 
         if args.run_baselines:
             baselines = ["random", "popular", "same_genre", "same_artist"]
             base_df = evaluate_baselines(rec, queries_df, baselines, args.use_subgenre, queries_df.iloc[0]["ground_truth"], args.K, 42)
-            base_df.to_csv("evaluation_baselines.csv", index=False)
-            print("Wrote evaluation_baselines.csv")
+            base_df.to_csv(DATA_DIR / "evaluation_baselines.csv", index=False)
+            print("Wrote data/evaluation_baselines.csv")
 
         if args.run_ablations:
             base_cfg = RecConfig(
@@ -510,9 +511,9 @@ def main():
             )
             ablations = build_ablation_configs(base_cfg)
             summary_ab, per_query_ab = evaluate_configs(rec, queries_df, ablations, args.use_subgenre, ground_truth=queries_df.iloc[0]["ground_truth"])
-            summary_ab.to_csv("evaluation_ablations_summary.csv", index=False)
-            per_query_ab.drop(columns=["rec_idxs"], errors="ignore").to_csv("evaluation_ablations.csv", index=False)
-            print("Wrote evaluation_ablations.csv")
+            summary_ab.to_csv(DATA_DIR / "evaluation_ablations_summary.csv", index=False)
+            per_query_ab.drop(columns=["rec_idxs"], errors="ignore").to_csv(DATA_DIR / "evaluation_ablations.csv", index=False)
+            print("Wrote data/evaluation_ablations.csv")
 
 if __name__ == "__main__":
     main()

@@ -10,6 +10,7 @@ artifacts/
 
 data/spotify_songs.csv
 data/spotify_songs_en_clean.csv
+data/evaluation*.csv
 
 .vscode/
 .streamlit/
