@@ -1,3 +1,4 @@
+"""Build all vector indexes + artifacts needed for recommendations."""
 import numpy as np
 import pandas as pd
 from collections import Counter, defaultdict
@@ -21,6 +22,7 @@ def main():
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(CLEAN_CSV)
 
+    # Use cleaned lyrics as the base text representation.
     texts = df["lyrics_clean"].astype(str).tolist()
     tokenized = [t.split() for t in texts]
 

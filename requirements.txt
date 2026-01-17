@@ -7,3 +7,4 @@ sentence-transformers
 streamlit
 tqdm
 gensim
+plotly

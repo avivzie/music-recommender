@@ -1,3 +1,4 @@
+"""Core recommendation logic (text/audio similarity + rules)."""
 from dataclasses import dataclass
 import re
 import numpy as np
@@ -19,11 +20,14 @@ class RecConfig:
     model_type: str = "SBERT_COSINE"      # "SBERT_COSINE", "TFIDF_COSINE", "BOW_COSINE", "W2V_COSINE", "JACCARD", "SBERT_EUCLIDEAN"
     alpha: float = 0.8
     genre_bonus: float = 0.02
+    genre_penalty: float = 0.03
     cluster_bonus: float = 0.02
     assoc_bonus: float = 0.05
     max_per_artist: int = 2
     topN_candidates: int = 200
     K: int = 10
+    out_of_genre_ratio: float = 0.30
+    adaptive_genre_bonus: bool = True
     use_subgenre: bool = False
     use_clusters: bool = True
     use_assoc: bool = False
@@ -111,6 +115,7 @@ class Recommender:
         return idxs
 
     def _text_candidates(self, seed_idxs: list[int], cfg: RecConfig):
+        # Build a text profile from seed songs, then search neighbors in the chosen space.
         model = cfg.model_type.upper()
         if model in {"TFIDF", "TFIDF_COSINE"}:
             seed_vecs = self.tfidf_matrix[seed_idxs]
@@ -160,10 +165,9 @@ class Recommender:
     def _auto_alpha(self, seed_idxs: list[int]) -> float:
         if len(seed_idxs) < 2:
             return 0.8
-        # Text similarity between seeds (SBERT cosine)
+        # Use seed similarity to decide how much to trust text vs audio.
         seed_vecs = self.sbert_embeddings[seed_idxs]
         text_sim = float(cosine_similarity(seed_vecs).mean())
-        # Audio similarity between seeds (cosine)
         audio_vecs = self.audio_matrix[seed_idxs]
         audio_sim = float(cosine_similarity(audio_vecs).mean())
         denom = text_sim + audio_sim
@@ -222,6 +226,7 @@ class Recommender:
         return cand_idxs, text_sims
 
     def recommend(self, selected_genre: str, seeds_title_artist: list[str], cfg: RecConfig) -> pd.DataFrame:
+        # Main recommendation flow: text+audio similarity + rules + de-dup.
         seed_idxs = self._seed_indices(seeds_title_artist)
         if len(seed_idxs) == 0:
             raise ValueError("No valid seeds found. Use format: 'track_name — artist' exactly as in dataset.")
@@ -262,6 +267,10 @@ class Recommender:
 
         genre_col = COL_SUBGENRE if cfg.use_subgenre else COL_GENRE
         selected_genre_norm = str(selected_genre).strip().lower()
+        genre_bonus_effective = cfg.genre_bonus
+        if cfg.adaptive_genre_bonus:
+            genre_bonus_effective = cfg.genre_bonus * (1.0 + 0.05 * max(cfg.K - 5, 0))
+        max_out_of_genre = int(np.floor(cfg.K * cfg.out_of_genre_ratio))
 
         rows = []
         seed_clusters = self.audio_clusters[seed_idxs] if cfg.use_clusters else None
@@ -282,7 +291,9 @@ class Recommender:
                 continue
             audio_sim = float(cosine_similarity(audio_profile, self.audio_matrix[idx:idx+1])[0][0])
             g = str(self.df.iloc[idx][genre_col]).strip().lower()
-            bonus = cfg.genre_bonus if g == selected_genre_norm else 0.0
+            in_genre = g == selected_genre_norm
+            bonus = genre_bonus_effective if in_genre else 0.0
+            penalty = 0.0 if in_genre else cfg.genre_penalty
             cluster_bonus = 0.0
             if cfg.use_clusters and majority_cluster is not None and self.audio_clusters[idx] == majority_cluster:
                 cluster_bonus = cfg.cluster_bonus
@@ -292,8 +303,8 @@ class Recommender:
                 cand_id = str(self.track_id_list[idx])
                 assoc_bonus = assoc_scores.get(cand_id, 0.0) * cfg.assoc_bonus
 
-            score = cfg.alpha * text_sim + (1.0 - cfg.alpha) * audio_sim + bonus + cluster_bonus + assoc_bonus
-            rows.append((idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus))
+            score = cfg.alpha * text_sim + (1.0 - cfg.alpha) * audio_sim + bonus - penalty + cluster_bonus + assoc_bonus
+            rows.append((idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus, in_genre))
 
         rows.sort(key=lambda x: x[1], reverse=True)
 
@@ -301,7 +312,8 @@ class Recommender:
         result = []
         artist_count: dict[str, int] = {}
         seen_tracks: set[str] = set()
-        for idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus in rows:
+        out_of_genre = 0
+        for idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus, in_genre in rows:
             raw_tid = self.track_id_list[idx]
             track_id = "" if pd.isna(raw_tid) else str(raw_tid).strip()
             track_name = str(self.df.iloc[idx][COL_TRACK_NAME]).strip().lower()
@@ -309,18 +321,22 @@ class Recommender:
             track_key = self.canonical_keys[idx] or track_id or f"{track_name}|{track_artist}"
             if track_key in seen_tracks:
                 continue
+            if not in_genre and out_of_genre >= max_out_of_genre:
+                continue
             artist = str(self.df.iloc[idx][COL_ARTIST])
             if artist_count.get(artist, 0) >= cfg.max_per_artist:
                 continue
             artist_count[artist] = artist_count.get(artist, 0) + 1
             result.append((idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus))
             seen_tracks.add(track_key)
+            if not in_genre:
+                out_of_genre += 1
             if len(result) >= cfg.K:
                 break
 
         # fallback fill
         if len(result) < cfg.K:
-            for idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus in rows:
+            for idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus, in_genre in rows:
                 if any(r[0] == idx for r in result):
                     continue
                 raw_tid = self.track_id_list[idx]
@@ -330,8 +346,12 @@ class Recommender:
                 track_key = self.canonical_keys[idx] or track_id or f"{track_name}|{track_artist}"
                 if track_key in seen_tracks:
                     continue
+                if not in_genre and out_of_genre >= max_out_of_genre:
+                    continue
                 result.append((idx, score, text_sim, audio_sim, bonus, cluster_bonus, assoc_bonus))
                 seen_tracks.add(track_key)
+                if not in_genre:
+                    out_of_genre += 1
                 if len(result) >= cfg.K:
                     break
 
@@ -361,6 +381,7 @@ class Recommender:
         return pd.DataFrame(out)
 
     def recommend_from_text(self, query_text: str, selected_genre: str, cfg: RecConfig) -> pd.DataFrame:
+        # Text-only flow: treat the prompt as the "seed" and rank by text similarity.
         if not query_text or not str(query_text).strip():
             raise ValueError("Query text is empty.")
 
@@ -375,21 +396,27 @@ class Recommender:
 
         genre_col = COL_SUBGENRE if cfg.use_subgenre else COL_GENRE
         selected_genre_norm = str(selected_genre).strip().lower()
+        genre_bonus_effective = cfg.genre_bonus
+        if cfg.adaptive_genre_bonus:
+            genre_bonus_effective = cfg.genre_bonus * (1.0 + 0.05 * max(cfg.K - 5, 0))
+        max_out_of_genre = int(np.floor(cfg.K * cfg.out_of_genre_ratio))
 
         rows = []
         for idx, text_sim in zip(cand_idxs, text_sims):
             if cfg.filter_outliers and self.outlier_flags[idx] == -1:
                 continue
             g = str(self.df.iloc[idx][genre_col]).strip().lower()
-            bonus = cfg.genre_bonus if g == selected_genre_norm else 0.0
+            in_genre = g == selected_genre_norm
+            bonus = genre_bonus_effective if in_genre else 0.0
+            penalty = 0.0 if in_genre else cfg.genre_penalty
             jacc_bonus = 0.0
             if q_size > 0 and cfg.model_type.upper() != "JACCARD":
                 inter = len(q_set & self.token_sets[idx])
                 union = q_size + self.token_set_sizes[idx] - inter
                 if union:
                     jacc_bonus = 0.1 * (inter / union)
-            score = cfg.alpha * float(text_sim) + bonus + jacc_bonus
-            rows.append((idx, score, float(text_sim), bonus))
+            score = cfg.alpha * float(text_sim) + bonus - penalty + jacc_bonus
+            rows.append((idx, score, float(text_sim), bonus, in_genre))
 
         rows.sort(key=lambda x: x[1], reverse=True)
 
@@ -397,11 +424,14 @@ class Recommender:
         result = []
         artist_count: dict[str, int] = {}
         seen_tracks: set[str] = set()
-        for idx, score, text_sim, bonus in rows:
+        out_of_genre = 0
+        for idx, score, text_sim, bonus, in_genre in rows:
             raw_tid = self.track_id_list[idx]
             track_id = "" if pd.isna(raw_tid) else str(raw_tid).strip()
             track_key = self.canonical_keys[idx] or track_id
             if track_key in seen_tracks:
+                continue
+            if not in_genre and out_of_genre >= max_out_of_genre:
                 continue
             artist = str(self.df.iloc[idx][COL_ARTIST])
             if artist_count.get(artist, 0) >= cfg.max_per_artist:
@@ -409,6 +439,8 @@ class Recommender:
             artist_count[artist] = artist_count.get(artist, 0) + 1
             result.append((idx, score, text_sim, bonus))
             seen_tracks.add(track_key)
+            if not in_genre:
+                out_of_genre += 1
             if len(result) >= cfg.K:
                 break
 

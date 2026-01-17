@@ -1,3 +1,4 @@
+"""Audio feature scaling and matrix building."""
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
@@ -8,16 +9,19 @@ SCALER_PATH = ARTIFACTS_DIR / "audio_scaler.joblib"
 AUDIO_MATRIX_PATH = ARTIFACTS_DIR / "audio_matrix.npy"
 
 def build_audio_matrix(df: pd.DataFrame, fit: bool = True) -> np.ndarray:
+    # Build scaled audio feature matrix (for cosine similarity).
     X = df[AUDIO_COLS].astype(float)
     X = X.fillna(X.median()).to_numpy()
 
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
     if fit:
+        # Fit and persist scaler for consistent transforms later.
         scaler = StandardScaler()
         Xs = scaler.fit_transform(X)
         dump(scaler, SCALER_PATH)
     else:
+        # Reuse saved scaler to keep feature scaling consistent.
         scaler = load(SCALER_PATH)
         Xs = scaler.transform(X)
 

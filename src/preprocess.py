@@ -1,3 +1,4 @@
+"""Text cleaning + basic dataset filtering."""
 import re
 import pandas as pd
 from src.config import RAW_CSV, CLEAN_CSV, COL_LANG, COL_LYRICS
@@ -8,6 +9,7 @@ TAG_RE = re.compile(
 )
 
 def clean_lyrics(text: str) -> str:
+    # Basic normalization: strip tags/links, lowercase, keep letters/apostrophes.
     text = str(text)
     text = TAG_RE.sub(" ", text)
     text = text.lower()
@@ -19,13 +21,13 @@ def clean_lyrics(text: str) -> str:
 def main():
     df = pd.read_csv(RAW_CSV)
 
-    # Filter English only + drop missing lyrics
+    # Keep English only and remove rows without lyrics.
     df = df[df[COL_LANG].astype(str).str.lower().eq("en")]
     df = df.dropna(subset=[COL_LYRICS])
 
     df["lyrics_clean"] = df[COL_LYRICS].map(clean_lyrics)
 
-    # Remove too-short lyrics (avoid noise)
+    # Remove too-short lyrics to reduce noisy text.
     df = df[df["lyrics_clean"].str.len() >= 60].copy()
 
     CLEAN_CSV.parent.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,16 @@
+"""Streamlit UI for the recommender (user flow + DS lab insights)."""
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
+import plotly.express as px
+import time
+from sklearn.manifold import TSNE
 from src.recommender import Recommender, RecConfig
 from src.evaluation import (
-    generate_queries_df,
-    evaluate_configs,
-    evaluate_baselines,
-    build_ablation_configs,
     EvalConfig,
 )
+from src.preprocess import clean_lyrics
 
 st.set_page_config(page_title="Music Recommender Demo", layout="wide")
 st.title("🎧 Music Recommender (Lyrics + Audio)")
@@ -46,6 +47,8 @@ df_ui, GENRES, DEMOS = build_ui_catalog(rec.df)
 def render_text_audio_contrib(row):
     text_sim = float(row.get("text_sim", 0.0) or 0.0)
     audio_sim = float(row.get("audio_sim", 0.0) or 0.0)
+    text_sim = max(text_sim, 0.0)
+    audio_sim = max(audio_sim, 0.0)
     total = text_sim + audio_sim
     if total <= 0:
         st.caption("Similarity mix: text 0% · audio 0%")
@@ -56,6 +59,44 @@ def render_text_audio_contrib(row):
     st.progress(text_pct, text="Text similarity")
     st.progress(audio_pct, text="Audio similarity")
 
+def render_feedback_controls(track_key: str):
+    if "rec_feedback" not in st.session_state:
+        st.session_state["rec_feedback"] = {}
+    current = st.session_state["rec_feedback"].get(track_key, "😐")
+    choice = st.radio(
+        "Your reaction",
+        ["👍", "😐", "👎"],
+        index=["👍", "😐", "👎"].index(current),
+        horizontal=True,
+        key=f"feedback_{track_key}",
+        label_visibility="collapsed"
+    )
+    st.session_state["rec_feedback"][track_key] = choice
+
+def render_reco_list(recos: list[dict]):
+    if not recos:
+        return
+    st.subheader("Top recommendations")
+    for row in recos:
+        # Keep each card consistent across reruns so feedback doesn't reset the list.
+        rank = int(row.get("rank", 0))
+        st.markdown(f"**{rank}. {row.get('track_name', '')}** — {row.get('track_artist', '')}")
+        st.caption(f"{row.get('playlist_genre', '')} · {row.get('playlist_subgenre', '')}")
+        render_text_audio_contrib(row)
+        feedback_key = str(row.get("track_id", "") or f"{row.get('track_name', '')}_{row.get('track_artist', '')}").strip()
+        render_feedback_controls(feedback_key)
+        track_id = str(row.get("track_id", "")).strip()
+        if track_id:
+            embed_html = (
+                '<iframe style="border-radius:12px" '
+                f'src="https://open.spotify.com/embed/track/{track_id}?utm_source=generator" '
+                'width="100%" height="152" frameBorder="0" allowfullscreen="" '
+                'allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" '
+                'loading="lazy"></iframe>'
+            )
+            components.html(embed_html, height=170)
+        st.divider()
+
 tab_user, tab_rec = st.tabs(["Recommend", "DS Lab"])
 
 # =========================================================
@@ -63,6 +104,7 @@ tab_user, tab_rec = st.tabs(["Recommend", "DS Lab"])
 # =========================================================
 with tab_user:
     st.subheader("Get recommendations")
+    # User-facing flow: pick seeds or describe a vibe, then show top tracks.
 
     input_mode = st.radio(
         "Input type",
@@ -182,6 +224,7 @@ with tab_user:
         run_disabled_user = len(str(query_text).strip()) == 0
     if st.button("Recommend", type="primary", disabled=run_disabled_user, key="recommend_user"):
         if input_mode == "Text prompt":
+            start_ts = time.time()
             words = [w for w in str(query_text).split() if w.strip()]
             use_tfidf = lyrics_mode or len(words) >= 20
             text_model = "TFIDF_COSINE" if use_tfidf else "SBERT_COSINE"
@@ -199,6 +242,7 @@ with tab_user:
                 filter_outliers=False
             )
             try:
+                # Short prompts work better with SBERT; long lyrics favor TF‑IDF.
                 df_out = rec.recommend_from_text(
                     query_text=query_text,
                     selected_genre=selected_genre_user,
@@ -208,53 +252,54 @@ with tab_user:
                 if df_out.empty:
                     st.warning("No recommendations were generated.")
                 else:
-                    st.subheader("Top recommendations")
                     ordered = df_out.sort_values("rank", ascending=True) if "rank" in df_out.columns else df_out
-                    for _, row in ordered.iterrows():
-                        rank = int(row["rank"]) if "rank" in row else 0
-                        st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
-                        st.caption(f"{row.get('playlist_genre', '')} · {row.get('playlist_subgenre', '')}")
-                        render_text_audio_contrib(row)
-                        track_id = str(row.get("track_id", "")).strip()
-                        if track_id:
-                            embed_html = (
-                                '<iframe style="border-radius:12px" '
-                                f'src="https://open.spotify.com/embed/track/{track_id}?utm_source=generator" '
-                                'width="100%" height="152" frameBorder="0" allowfullscreen="" '
-                                'allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" '
-                                'loading="lazy"></iframe>'
-                            )
-                            components.html(embed_html, height=170)
-                        st.divider()
+                    st.session_state["user_recos"] = ordered.to_dict(orient="records")
+                    st.session_state["last_run"] = {
+                        "mode": "text_prompt",
+                        "model": text_model,
+                        "selected_genre": selected_genre_user,
+                        "query_text": query_text,
+                        "rec_idxs": ordered["row_idx"].tolist() if "row_idx" in ordered.columns else [],
+                        "latency_s": time.time() - start_ts,
+                    }
             except Exception as e:
                 st.error(str(e))
         else:
             candidates = [
                 RecConfig(model_type="SBERT_COSINE", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False,
+                          auto_alpha=True, out_of_genre_ratio=0.30, adaptive_genre_bonus=True, genre_penalty=0.03),
                 RecConfig(model_type="TFIDF_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False,
+                          auto_alpha=True, out_of_genre_ratio=0.30, adaptive_genre_bonus=True, genre_penalty=0.03),
                 RecConfig(model_type="W2V_COSINE", alpha=0.85, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False,
+                          auto_alpha=True, out_of_genre_ratio=0.30, adaptive_genre_bonus=True, genre_penalty=0.03),
                 RecConfig(model_type="BOW_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False,
+                          auto_alpha=True, out_of_genre_ratio=0.30, adaptive_genre_bonus=True, genre_penalty=0.03),
                 RecConfig(model_type="JACCARD", alpha=0.7, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False,
+                          auto_alpha=True, out_of_genre_ratio=0.30, adaptive_genre_bonus=True, genre_penalty=0.03),
                 RecConfig(model_type="SBERT_EUCLIDEAN", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False,
+                          auto_alpha=True, out_of_genre_ratio=0.30, adaptive_genre_bonus=True, genre_penalty=0.03),
             ]
 
             progress = st.progress(0, text="Running model tournament...")
             results = []
 
             try:
+                # Tournament: run all models, then pick the best composite score.
                 seed_idxs_user = rec._seed_indices(seeds_user) if seeds_user else []
                 for i, cfg in enumerate(candidates, start=1):
+                    t0 = time.time()
                     df_out = rec.recommend(
                         selected_genre=selected_genre_user,
                         seeds_title_artist=seeds_user,
                         cfg=cfg
                     )
+                    latency = time.time() - t0
                     rec_idxs = df_out["row_idx"].tolist() if "row_idx" in df_out.columns else []
                     mean_score = float(df_out["score"].mean()) if "score" in df_out.columns and not df_out.empty else 0.0
                     diversity = df_out["track_artist"].nunique() / len(df_out) if "track_artist" in df_out.columns and len(df_out) else 0.0
@@ -286,6 +331,7 @@ with tab_user:
                         "diversity": diversity,
                         "novelty": novelty,
                         "mean_score_raw": mean_score,
+                        "latency_s": latency,
                     })
                     progress.progress(i / len(candidates), text=f"Evaluating {cfg.model_type}...")
 
@@ -312,31 +358,26 @@ with tab_user:
                     ])
                     st.session_state["tournament_scoreboard"] = scoreboard
                     st.session_state["tournament_best"] = best
-
                     best_out = best["df_out"]
+                    st.session_state["last_run"] = {
+                        "mode": "seed_tracks",
+                        "model": best["model"],
+                        "selected_genre": selected_genre_user,
+                        "seeds": seeds_user,
+                        "rec_idxs": best_out["row_idx"].tolist() if best_out is not None and "row_idx" in best_out.columns else [],
+                        "latency_s": best.get("latency_s", 0.0),
+                        "model_latencies": {r["model"]: r.get("latency_s", 0.0) for r in results_sorted},
+                    }
                     if best_out is None or best_out.empty:
                         st.warning("No recommendations were generated.")
                     else:
-                        st.subheader("Top recommendations")
                         ordered = best_out.sort_values("rank", ascending=True) if "rank" in best_out.columns else best_out
-                        for _, row in ordered.iterrows():
-                            rank = int(row["rank"]) if "rank" in row else 0
-                            st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
-                            st.caption(f"{row.get('playlist_genre', '')} · {row.get('playlist_subgenre', '')}")
-                            render_text_audio_contrib(row)
-                            track_id = str(row.get("track_id", "")).strip()
-                            if track_id:
-                                embed_html = (
-                                    '<iframe style="border-radius:12px" '
-                                    f'src="https://open.spotify.com/embed/track/{track_id}?utm_source=generator" '
-                                    'width="100%" height="152" frameBorder="0" allowfullscreen="" '
-                                    'allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" '
-                                    'loading="lazy"></iframe>'
-                                )
-                                components.html(embed_html, height=170)
-                            st.divider()
+                        st.session_state["user_recos"] = ordered.to_dict(orient="records")
             except Exception as e:
                 st.error(str(e))
+
+    if "user_recos" in st.session_state and st.session_state["user_recos"]:
+        render_reco_list(st.session_state["user_recos"])
 
 # =========================================================
 # Recommend tab (DS)
@@ -344,406 +385,100 @@ with tab_user:
 with tab_rec:
     st.subheader("DS Lab")
 
-    with st.expander("Model settings", expanded=True):
-        model_type = st.selectbox(
-            "Text model",
-            ["SBERT_COSINE", "TFIDF_COSINE", "BOW_COSINE", "W2V_COSINE", "JACCARD", "SBERT_EUCLIDEAN"]
-        )
-        alpha = st.slider(
-            "alpha (text vs audio)",
-            0.0, 1.0, 0.8, 0.05,
-            help="0 = only audio similarity, 1 = only text (lyrics) similarity."
-        )
-        genre_bonus = st.slider(
-            "genre_bonus",
-            0.0, 0.10, 0.02, 0.01,
-            help="Extra boost if track genre matches the selected genre/subgenre."
-        )
-        cluster_bonus = st.slider(
-            "cluster_bonus",
-            0.0, 0.10, 0.02, 0.01,
-            help="Bonus for tracks in the dominant audio cluster of the seed songs."
-        )
-        assoc_bonus = st.slider(
-            "association_bonus",
-            0.0, 0.20, 0.05, 0.01,
-            help="Boost for tracks that often co-occur with seeds in playlists."
-        )
-        max_per_artist = st.selectbox("Max tracks per artist in Top-K", [1, 2, 3], index=1)
-        use_subgenre = st.checkbox("Use subgenre (playlist_subgenre)", value=False)
-        use_clusters = st.checkbox(
-            "Use audio clusters bonus",
-            value=True,
-            help="Encourages recommendations from the main audio cluster of the seeds."
-        )
-        use_assoc = st.checkbox(
-            "Use association rules bonus",
-            value=False,
-            help="Uses playlist co-occurrence rules to boost likely pairs."
-        )
-        filter_outliers = st.checkbox(
-            "Filter outliers",
-            value=False,
-            help="Remove tracks flagged as audio outliers."
-        )
-        K = st.selectbox("K", [5, 10, 15, 20], index=1)
-
-    st.subheader("1) Choose genre/subgenre + 3–5 seed tracks")
-
-    # Demo seeds buttons (place before widgets that bind to session_state keys)
-    st.caption("Tip: Load demo seeds to test quickly, then refine.")
-    c1, c2, c3, _ = st.columns([1, 1, 1, 6])
-    if c1.button("Load demo: Pop", key="demo_ds_pop"):
-        st.session_state["selected_genre"] = "pop"
-        st.session_state["seed_tracks"] = DEMOS.get("pop", [])
-        st.rerun()
-    if c2.button("Load demo: Rock", key="demo_ds_rock"):
-        st.session_state["selected_genre"] = "rock"
-        st.session_state["seed_tracks"] = DEMOS.get("rock", [])
-        st.rerun()
-    if c3.button("Load demo: Rap", key="demo_ds_rap"):
-        st.session_state["selected_genre"] = "rap"
-        st.session_state["seed_tracks"] = DEMOS.get("rap", [])
-        st.rerun()
-
-    # Genre dropdown (instead of free text)
-    default_genre = "pop" if "pop" in GENRES else (GENRES[0] if GENRES else "")
-    if "selected_genre" in st.session_state and st.session_state["selected_genre"] not in GENRES:
-        st.session_state["selected_genre"] = default_genre
-    selected_genre = st.selectbox(
-        "Selected genre (from dataset)",
-        options=GENRES,
-        index=GENRES.index(default_genre) if default_genre in GENRES else 0,
-        key="selected_genre"
-    )
-
-    selected_subgenre = None
-    df_pool = df_ui[df_ui["playlist_genre"] == selected_genre].copy()
-
-    # If using subgenre - show dependent dropdown and filter pool
-    if use_subgenre:
-        subgenres = sorted(
-            df_pool["playlist_subgenre"].dropna().unique().tolist()
-        )
-        if subgenres:
-            selected_subgenre = st.selectbox("Selected subgenre", options=subgenres)
-            df_pool = df_pool[df_pool["playlist_subgenre"] == selected_subgenre].copy()
-        else:
-            st.info("No subgenres found for this genre. Using genre only.")
-            selected_subgenre = None
-
-    # Track options for seeds (autocomplete)
-    track_options = sorted(df_pool["track_option"].dropna().unique().tolist())
-    if "seed_tracks" not in st.session_state:
-        st.session_state["seed_tracks"] = []
-    current_seeds = st.session_state.get("seed_tracks", [])
-    filtered_seeds = [x for x in current_seeds if x in track_options]
-    if filtered_seeds != current_seeds:
-        st.session_state["seed_tracks"] = filtered_seeds
-
-    seeds = st.multiselect(
-        "Seed tracks (choose 3–5)",
-        options=track_options,
-        key="seed_tracks",
-        help="Search by track or artist. Format: track_name — track_artist"
-    )
-
-    # Validate count (soft enforcement; avoid Streamlit max_selections warning)
-    if len(seeds) not in (3, 4, 5):
-        st.warning("Please select **3–5** seed tracks to get recommendations.")
-
-    # Run
-    run_disabled = len(seeds) < 3 or len(seeds) > 5
-    if st.button("Recommend", type="primary", disabled=run_disabled):
-        cfg = RecConfig(
-            model_type=model_type,
-            alpha=alpha,
-            genre_bonus=genre_bonus,
-            cluster_bonus=cluster_bonus,
-            assoc_bonus=assoc_bonus,
-            max_per_artist=max_per_artist,
-            K=K,
-            use_subgenre=use_subgenre,
-            use_clusters=use_clusters,
-            use_assoc=use_assoc,
-            filter_outliers=filter_outliers
-        )
-        try:
-            # IMPORTANT: keep your API as-is
-            # selected_genre is passed as string; when use_subgenre=True we pass subgenre if selected
-            genre_value = selected_subgenre if (use_subgenre and selected_subgenre) else selected_genre
-
-            df_out = rec.recommend(
-                selected_genre=genre_value,
-                seeds_title_artist=seeds,
-                cfg=cfg
-            )
-
-            st.success("Done")
-
-            # Nice display (keep original df, just reorder if possible)
-            preferred_cols = [
-                "rank", "track_name", "track_artist", "playlist_genre", "playlist_subgenre",
-                "final_score", "text_sim", "audio_sim"
-            ]
-            cols_to_show = [c for c in preferred_cols if c in df_out.columns]
-            st.dataframe(df_out[cols_to_show] if cols_to_show else df_out, use_container_width=True, hide_index=True)
-
-            # Tiny UX: show artist diversity if possible
-            if "track_artist" in df_out.columns and len(df_out) > 0:
-                st.caption(f"Artist diversity: **{df_out['track_artist'].nunique()}/{len(df_out)}** unique artists")
-
-            if show_explain:
-                st.subheader("Explainability: Text vs Audio")
-                ordered = df_out.sort_values("rank", ascending=True) if "rank" in df_out.columns else df_out
-                for _, row in ordered.iterrows():
-                    rank = int(row["rank"]) if "rank" in row else 0
-                    st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
-                    render_text_audio_contrib(row)
-                st.caption("These bars show the relative similarity contribution from lyrics vs audio features.")
-
-            with st.expander("Why these recommendations?"):
-                st.write(
-                    "Ranking combines **lyrics similarity** and **audio-feature similarity** with a soft genre boost "
-                    "and an artist diversity constraint."
-                )
-                st.write(f"- Text model: **{model_type}**")
-                st.write(f"- alpha (text vs audio): **{alpha}**")
-                st.write(f"- genre bonus: **{genre_bonus}**")
-                st.write(f"- cluster bonus: **{cluster_bonus}**")
-                st.write(f"- association bonus: **{assoc_bonus}**")
-                st.write(f"- max tracks per artist: **{max_per_artist}**")
-                st.write(f"- K: **{K}**")
-
-        except Exception as e:
-            st.error(str(e))
-
-    show_explain = st.checkbox("Show explainability for DS recommendations", value=False)
     st.divider()
-    st.subheader("Quick evaluation")
-
+    st.subheader("Model tournament (background process)")
+    with st.expander("What you’re seeing here"):
+        st.markdown(
+            "- **Tournament scoreboard**: models compete on the same seeds; the best composite score wins.\n"
+            "- **Run Insights**: shows what happened in the last user run (latency, success rate, embedding map).\n"
+            "- **Embedding map**: PCA/t‑SNE view of seed vs recommendation positions in SBERT space.\n"
+            "- **Debug NLP**: shows cleaned text so you can verify preprocessing."
+        )
     if "tournament_scoreboard" in st.session_state:
-        st.subheader("Model tournament scoreboard")
-        st.dataframe(st.session_state["tournament_scoreboard"], use_container_width=True, hide_index=True)
-        with st.expander("Metric explanations"):
+        scoreboard = st.session_state["tournament_scoreboard"]
+        st.dataframe(scoreboard, width="stretch", hide_index=True)
+        with st.expander("How the winner is chosen"):
             st.markdown(
-                "- **Composite**: weighted score from normalized similarity + playlist proxy + diversity + novelty.\n"
-                "- **Normalized similarity**: per-model min-max normalization of recommendation scores.\n"
-                "- **Playlist precision@K**: fraction of top-K songs that co-occur with seed playlists.\n"
-                "- **Hit rate@K**: whether any top-K song co-occurs with seed playlists.\n"
-                "- **Diversity**: fraction of unique artists in the top-K.\n"
-                "- **Novelty**: higher when recommendations are less popular."
+                "- **Composite score** blends normalized similarity, playlist proxy, diversity, and novelty.\n"
+                "- Models with higher composite scores win and are shown to the user.\n"
+                "- Latency is shown below for transparency."
             )
-        if "tournament_best" in st.session_state:
-            best = st.session_state["tournament_best"]
-            with st.expander("Why this model won"):
-                st.write(
-                    "The winner maximizes the **composite score**, which blends normalized similarity, playlist co-occurrence "
-                    "signals, and diversity/novelty. This avoids bias toward models with larger raw score ranges."
-                )
-                st.write(f"- Normalized similarity: **{best['norm_mean_score']:.3f}**")
-                st.write(f"- Playlist precision@K: **{best['playlist_precision']:.3f}**")
-                st.write(f"- Hit rate@K: **{best['playlist_hit_rate']:.3f}**")
-                st.write(f"- Diversity: **{best['diversity']:.3f}**")
-                st.write(f"- Novelty: **{best['novelty']:.3f}**")
+    else:
+        st.info("Run a recommendation in the Recommend tab to see model competition.")
 
-    eval_cfg = EvalConfig(use_subgenre=use_subgenre, n_queries=8, seeds_per_query=4, K=K)
-    ground_truth = st.selectbox("Ground truth", ["playlist", "genre", "subgenre", "album", "artist"], index=0)
-    n_queries = st.slider("Number of queries", 4, 15, eval_cfg.n_queries)
-    seeds_per_query = st.slider("Seeds per query", 2, 6, eval_cfg.seeds_per_query)
-    run_baselines = st.checkbox("Run baselines (random/popular/genre/artist)", value=True)
-    run_ablations = st.checkbox("Run ablation study", value=False)
+    st.divider()
+    st.subheader("Run Insights (latest Recommend run)")
+    last_run = st.session_state.get("last_run")
+    if not last_run:
+        st.info("Run a recommendation in the Recommend tab to populate insights here.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Mode", last_run.get("mode", "-"))
+        c2.metric("Model", last_run.get("model", "-"))
+        c3.metric("Latency (s)", f"{last_run.get('latency_s', 0.0):.2f}")
 
-    models = st.multiselect(
-        "Models to compare",
-        ["SBERT_COSINE", "TFIDF_COSINE", "BOW_COSINE", "W2V_COSINE", "JACCARD", "SBERT_EUCLIDEAN"],
-        default=["SBERT_COSINE", "TFIDF_COSINE", "W2V_COSINE"]
-    )
+        feedback = st.session_state.get("rec_feedback", {})
+        likes = sum(1 for v in feedback.values() if v == "👍")
+        dislikes = sum(1 for v in feedback.values() if v == "👎")
+        neutrals = sum(1 for v in feedback.values() if v == "😐")
+        rated = likes + dislikes
+        success_rate = (likes / rated) if rated else 0.0
+        st.metric("Success Rate", f"{success_rate:.0%}")
+        st.caption(f"👍 {likes} | 😐 {neutrals} | 👎 {dislikes}")
 
-    if st.button("Run evaluation"):
-        if not models:
-            st.error("Select at least one model to evaluate.")
-            st.stop()
+        rec_idxs = last_run.get("rec_idxs", [])
+        if rec_idxs:
+            st.subheader("Embedding map (SBERT)")
+            method = st.selectbox("Projection method", ["PCA", "t-SNE"], index=0)
+            points = rec.sbert_embeddings[rec_idxs]
+            pca_df = pd.DataFrame(points, columns=[f"d{i}" for i in range(points.shape[1])])
+            pca_df["label"] = "recommendation"
+            if last_run.get("mode") == "seed_tracks":
+                seed_idxs = rec._seed_indices(last_run.get("seeds", []))
+                if seed_idxs:
+                    seed_pts = rec.sbert_embeddings[seed_idxs]
+                    seed_df = pd.DataFrame(seed_pts, columns=pca_df.columns[:-1])
+                    seed_df["label"] = "seed"
+                    pca_df = pd.concat([pca_df, seed_df], ignore_index=True)
 
-        with st.spinner("Running evaluation..."):
-            queries_df = generate_queries_df(
-                rec.df,
-                use_subgenre=use_subgenre,
-                n_queries=n_queries,
-                seeds_per_query=seeds_per_query,
-                ground_truth=ground_truth
-            )
+            # downsample for t-SNE
+            if method == "t-SNE" and len(pca_df) > 200:
+                pca_df = pca_df.sample(200, random_state=42).reset_index(drop=True)
 
-            cfgs = [
-                RecConfig(
-                    model_type=m,
-                    alpha=alpha,
-                    genre_bonus=genre_bonus,
-                    cluster_bonus=cluster_bonus,
-                    assoc_bonus=assoc_bonus,
-                    max_per_artist=max_per_artist,
-                    K=K,
-                    use_subgenre=use_subgenre,
-                    use_clusters=use_clusters,
-                    use_assoc=use_assoc,
-                    filter_outliers=filter_outliers
-                )
-                for m in models
-            ]
+            X = pca_df.drop(columns=["label"]).to_numpy()
+            if method == "PCA":
+                X = X - X.mean(axis=0, keepdims=True)
+                U, S, Vt = np.linalg.svd(X, full_matrices=False)
+                coords = U[:, :2] * S[:2]
+            else:
+                perplexity = max(2, min(20, (len(X) - 1) // 3))
+                coords = TSNE(n_components=2, random_state=42, perplexity=perplexity).fit_transform(X)
 
-            summary, per_query = evaluate_configs(
-                rec,
-                queries_df,
-                cfgs,
-                use_subgenre,
-                ground_truth=queries_df.iloc[0]["ground_truth"] if not queries_df.empty else "genre"
-            )
+            pca_df["x"] = coords[:, 0]
+            pca_df["y"] = coords[:, 1]
+            fig = px.scatter(pca_df, x="x", y="y", color="label", title=f"{method} projection")
+            st.plotly_chart(fig, width="stretch")
 
-            st.session_state["ds_summary"] = summary
-            st.session_state["ds_per_query"] = per_query
-
-            if run_baselines:
-                baselines = ["random", "popular", "same_genre", "same_artist"]
-                base_df = evaluate_baselines(
-                    rec,
-                    queries_df,
-                    baselines,
-                    use_subgenre,
-                    queries_df.iloc[0]["ground_truth"] if not queries_df.empty else "genre",
-                    K,
-                    42
-                )
-                st.session_state["ds_baselines"] = base_df
-
-            if run_ablations:
-                base_cfg = RecConfig(
-                    model_type="SBERT_COSINE",
-                    alpha=alpha,
-                    genre_bonus=genre_bonus,
-                    cluster_bonus=cluster_bonus,
-                    assoc_bonus=assoc_bonus,
-                    K=K,
-                    use_subgenre=use_subgenre,
-                    use_clusters=use_clusters,
-                    use_assoc=use_assoc,
-                    filter_outliers=filter_outliers
-                )
-                ablations = build_ablation_configs(base_cfg)
-                summary_ab, per_query_ab = evaluate_configs(
-                    rec,
-                    queries_df,
-                    ablations,
-                    use_subgenre,
-                    ground_truth=queries_df.iloc[0]["ground_truth"] if not queries_df.empty else "genre"
-                )
-                st.session_state["ds_ablations_summary"] = summary_ab
-                st.session_state["ds_ablations"] = per_query_ab
-
-        if summary.empty:
-            st.warning("No valid queries were generated.")
+        st.subheader("Latency + model comparison (latest tournament)")
+        if last_run.get("mode") == "seed_tracks" and "model_latencies" in last_run:
+            lat_df = pd.DataFrame(
+                [{"model": k, "latency_s": v} for k, v in last_run["model_latencies"].items()]
+            ).sort_values("latency_s")
+            st.dataframe(lat_df, width="stretch", hide_index=True)
+            fig_lat = px.bar(lat_df, x="model", y="latency_s", title="Latency per model")
+            st.plotly_chart(fig_lat, width="stretch")
         else:
-            st.success("Evaluation complete")
-            with st.expander("Metric explanations"):
-                st.markdown(
-                    "- **Precision@K**: how many of the top-K are relevant.\n"
-                    "- **Recall@K**: how many of the relevant items were retrieved.\n"
-                    "- **nDCG@K**: rewards putting relevant items higher in the ranking.\n"
-                    "- **Hit Rate@K**: did we get at least one relevant item.\n"
-                    "- **Artist/Genre Diversity**: fraction of unique artists/genres in top-K.\n"
-                    "- **Novelty**: higher when recommended tracks are less popular.\n"
-                    "- **Coverage**: how many unique items are ever recommended."
-                )
-            st.dataframe(summary, use_container_width=True, hide_index=True)
+            st.caption("Latency table is available for seed-track tournament runs.")
 
-            st.subheader("Per-query results")
-            st.dataframe(per_query.drop(columns=["rec_idxs"], errors="ignore"), use_container_width=True, hide_index=True)
-
-    if "ds_summary" in st.session_state:
-        st.divider()
-        st.subheader("Dashboard")
-        with st.expander("How to read this dashboard"):
-            st.markdown(
-                "- **Precision@K**: share of top‑K recommendations that are relevant.\n"
-                "- **nDCG@K**: ranking quality (higher means relevant items appear higher).\n"
-                "- **Diversity**: variety of artists in top‑K (higher means less repetition).\n"
-                "- **Novelty**: favors less‑popular tracks (higher = more discovery)."
-            )
-        summary = st.session_state["ds_summary"]
-        best_row = summary.sort_values("ndcg@K", ascending=False).iloc[0]
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Precision@K", f"{best_row['precision@K']:.3f}")
-        c2.metric("nDCG@K", f"{best_row['ndcg@K']:.3f}")
-        c3.metric("Diversity", f"{best_row['artist_diversity']:.3f}")
-        c4.metric("Novelty", f"{best_row['novelty']:.3f}")
-
-        st.subheader("Model comparison")
-        chart_df = summary[["model_type", "ndcg@K"]].set_index("model_type")
-        st.bar_chart(chart_df)
-        st.caption("Bar chart shows average nDCG@K per model (higher is better).")
-
-        st.subheader("Parameter sweep (alpha)")
-        st.caption("Shows how the text-vs-audio balance affects quality for a single model.")
-        sweep_model = st.selectbox("Model for alpha sweep", summary["model_type"].tolist(), index=0)
-        if st.button("Run alpha sweep"):
-            alphas = [0.0, 0.25, 0.5, 0.75, 1.0]
-            sweep_rows = []
-            for a in alphas:
-                cfg = RecConfig(
-                    model_type=sweep_model,
-                    alpha=a,
-                    genre_bonus=genre_bonus,
-                    cluster_bonus=cluster_bonus,
-                    assoc_bonus=assoc_bonus,
-                    K=K,
-                    use_subgenre=use_subgenre,
-                    use_clusters=use_clusters,
-                    use_assoc=use_assoc,
-                    filter_outliers=filter_outliers
-                )
-                queries_df = generate_queries_df(
-                    rec.df,
-                    use_subgenre=use_subgenre,
-                    n_queries=n_queries,
-                    seeds_per_query=seeds_per_query,
-                    ground_truth=ground_truth
-                )
-                summ, _ = evaluate_configs(
-                    rec,
-                    queries_df,
-                    [cfg],
-                    use_subgenre,
-                    ground_truth=queries_df.iloc[0]["ground_truth"] if not queries_df.empty else "genre"
-                )
-                if not summ.empty:
-                    sweep_rows.append({"alpha": a, "ndcg@K": float(summ.iloc[0]["ndcg@K"])})
-            if sweep_rows:
-                sweep_df = pd.DataFrame(sweep_rows).set_index("alpha")
-                st.line_chart(sweep_df)
-                st.caption("Line chart shows how nDCG@K changes with alpha (higher is better).")
-
-        st.subheader("Top failures")
-        per_query = st.session_state.get("ds_per_query", pd.DataFrame())
-        if not per_query.empty:
-            failures = per_query.sort_values("ndcg@K").head(10)
-            st.dataframe(
-                failures[["query_id", "model_type", "ndcg@K", "precision@K", "recall@K", "hit_rate@K", "n_relevant"]],
-                use_container_width=True,
-                hide_index=True
-            )
-            st.caption("Lowest nDCG@K cases to inspect where the model fails and why.")
-
-        if "ds_baselines" in st.session_state:
-            st.subheader("Baselines")
-            base_df = st.session_state["ds_baselines"]
-            base_summary = (
-                base_df.groupby("model_type")[["precision@K", "recall@K", "ndcg@K", "hit_rate@K"]]
-                .mean()
-                .reset_index()
-            )
-            st.dataframe(base_summary, use_container_width=True, hide_index=True)
-            st.caption("Baselines help validate the model adds value over naive approaches.")
-
-        if "ds_ablations_summary" in st.session_state:
-            st.subheader("Ablation study")
-            st.dataframe(st.session_state["ds_ablations_summary"], use_container_width=True, hide_index=True)
-            st.caption("Ablations show which components contribute most to performance.")
+        st.subheader("Debug NLP (cleaned text)")
+        if last_run.get("mode") == "text_prompt":
+            cleaned = clean_lyrics(last_run.get("query_text", ""))
+            st.code(cleaned, language="text")
+        else:
+            seeds = last_run.get("seeds", [])
+            if seeds:
+                df_lookup = rec.df.copy()
+                df_lookup["track_option"] = df_lookup["track_name"].fillna("") + " — " + df_lookup["track_artist"].fillna("")
+                samples = df_lookup[df_lookup["track_option"].isin(seeds)]
+                if "lyrics_clean" in samples.columns:
+                    st.dataframe(samples[["track_option", "lyrics_clean"]], width="stretch", hide_index=True)

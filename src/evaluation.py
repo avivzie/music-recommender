@@ -1,3 +1,4 @@
+"""Evaluation utilities and metrics for comparing models."""
 import argparse
 from dataclasses import dataclass
 from typing import Iterable
@@ -130,21 +131,25 @@ def make_queries(use_subgenre: bool = False, n_queries: int = 8, seeds_per_query
     print("Wrote evaluation_queries.csv")
 
 def _precision_at_k(recs: list[int], relevant: set[int], k: int) -> float:
+    # Fraction of top-K that are relevant.
     if k == 0:
         return 0.0
     hits = sum(1 for r in recs[:k] if r in relevant)
     return hits / k
 
 def _recall_at_k(recs: list[int], relevant: set[int], k: int) -> float:
+    # Fraction of relevant items retrieved in top-K.
     if not relevant:
         return 0.0
     hits = sum(1 for r in recs[:k] if r in relevant)
     return hits / len(relevant)
 
 def _hit_rate_at_k(recs: list[int], relevant: set[int], k: int) -> float:
+    # Any hit in top-K?
     return 1.0 if any(r in relevant for r in recs[:k]) else 0.0
 
 def _ndcg_at_k(recs: list[int], relevant: set[int], k: int) -> float:
+    # Ranking-sensitive metric (higher weight for earlier hits).
     if k == 0:
         return 0.0
     dcg = 0.0
