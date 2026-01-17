@@ -49,7 +49,13 @@ tab_user, tab_rec = st.tabs(["Recommend", "DS Lab"])
 # User tab (simple)
 # =========================================================
 with tab_user:
-    st.subheader("Pick 3–5 songs you like")
+    st.subheader("Get recommendations")
+
+    input_mode = st.radio(
+        "Input type",
+        ["Seed tracks", "Text prompt"],
+        horizontal=True
+    )
 
     c1, c2, c3, _ = st.columns([1, 1, 1, 6])
     if c1.button("Load demo: Pop", key="demo_user_pop"):
@@ -85,16 +91,27 @@ with tab_user:
     if filtered_seeds_user != current_seeds_user:
         st.session_state["seed_tracks_user"] = filtered_seeds_user
 
-    seeds_user = st.multiselect(
-        "Seed tracks (choose 3–5)",
-        options=track_options_user,
-        key="seed_tracks_user",
-        help="Search by track or artist. Format: track_name — track_artist"
-    )
+    seeds_user = []
+    query_text = ""
+    if input_mode == "Seed tracks":
+        st.caption("Pick 3–5 songs you already like.")
+        seeds_user = st.multiselect(
+            "Seed tracks (choose 3–5)",
+            options=track_options_user,
+            key="seed_tracks_user",
+            help="Search by track or artist. Format: track_name — track_artist"
+        )
+    else:
+        st.caption("Describe the mood or theme in free text.")
+        query_text = st.text_area(
+            "Describe the vibe you want",
+            placeholder="I feel nostalgic and want upbeat classic rock with uplifting lyrics..."
+        )
+        lyrics_mode = st.checkbox("Lyrics match (TF‑IDF)", value=False)
 
     K_user = st.slider("How many recommendations?", 5, 15, 10, 1)
 
-    if seeds_user:
+    if input_mode == "Seed tracks" and seeds_user:
         st.subheader("Your selected songs")
         track_id_map = (
             df_pool_user.dropna(subset=["track_id"])
@@ -146,96 +163,40 @@ with tab_user:
         pop = pd.to_numeric(rec_df.loc[rec_idxs, "track_popularity"], errors="coerce").fillna(0.0)
         return float((1.0 - (pop / 100.0)).mean())
 
-    run_disabled_user = len(seeds_user) < 3 or len(seeds_user) > 5
+    if input_mode == "Seed tracks":
+        run_disabled_user = len(seeds_user) < 3 or len(seeds_user) > 5
+    else:
+        run_disabled_user = len(str(query_text).strip()) == 0
     if st.button("Recommend", type="primary", disabled=run_disabled_user, key="recommend_user"):
-        candidates = [
-            RecConfig(model_type="SBERT_COSINE", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                      max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
-            RecConfig(model_type="TFIDF_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                      max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
-            RecConfig(model_type="W2V_COSINE", alpha=0.85, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                      max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
-            RecConfig(model_type="BOW_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                      max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
-            RecConfig(model_type="JACCARD", alpha=0.7, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                      max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
-            RecConfig(model_type="SBERT_EUCLIDEAN", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                      max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
-        ]
-
-        progress = st.progress(0, text="Running model tournament...")
-        results = []
-
-        try:
-            seed_idxs_user = rec._seed_indices(seeds_user)
-            for i, cfg in enumerate(candidates, start=1):
-                df_out = rec.recommend(
+        if input_mode == "Text prompt":
+            words = [w for w in str(query_text).split() if w.strip()]
+            use_tfidf = lyrics_mode or len(words) >= 20
+            text_model = "TFIDF_COSINE" if use_tfidf else "SBERT_COSINE"
+            cfg_text = RecConfig(
+                model_type=text_model,
+                alpha=1.0,
+                genre_bonus=0.02,
+                cluster_bonus=0.0,
+                assoc_bonus=0.0,
+                max_per_artist=2,
+                K=K_user,
+                use_subgenre=False,
+                use_clusters=False,
+                use_assoc=False,
+                filter_outliers=False
+            )
+            try:
+                df_out = rec.recommend_from_text(
+                    query_text=query_text,
                     selected_genre=selected_genre_user,
-                    seeds_title_artist=seeds_user,
-                    cfg=cfg
+                    cfg=cfg_text
                 )
-                rec_idxs = df_out["row_idx"].tolist() if "row_idx" in df_out.columns else []
-                mean_score = float(df_out["score"].mean()) if "score" in df_out.columns and not df_out.empty else 0.0
-                diversity = df_out["track_artist"].nunique() / len(df_out) if "track_artist" in df_out.columns and len(df_out) else 0.0
-                novelty = _novelty(rec.df, rec_idxs)
-                playlist_rel = _playlist_relevance(rec.df, seed_idxs_user, rec_idxs)
-
-                # Normalize within-model scores (min-max) for fair comparison
-                if "score" in df_out.columns and not df_out.empty:
-                    norm_scores = _normalize_minmax(df_out["score"].tolist())
-                    norm_mean = float(np.mean(norm_scores)) if norm_scores else 0.0
-                else:
-                    norm_mean = 0.0
-
-                # Composite: normalized sim + playlist proxy + diversity + novelty
-                composite = (
-                    0.45 * norm_mean
-                    + 0.35 * playlist_rel["precision"]
-                    + 0.10 * diversity
-                    + 0.10 * novelty
-                )
-
-                results.append({
-                    "model": cfg.model_type,
-                    "df_out": df_out,
-                    "composite": composite,
-                    "norm_mean_score": norm_mean,
-                    "playlist_precision": playlist_rel["precision"],
-                    "playlist_hit_rate": playlist_rel["hit_rate"],
-                    "diversity": diversity,
-                    "novelty": novelty,
-                    "mean_score_raw": mean_score,
-                })
-                progress.progress(i / len(candidates), text=f"Evaluating {cfg.model_type}...")
-
-            if not results:
-                st.warning("No recommendations were generated.")
-            else:
-                results_sorted = sorted(results, key=lambda x: x["composite"], reverse=True)
-                best = results_sorted[0]
-                st.success(f"Best model: {best['model']}")
-
-                scoreboard = pd.DataFrame([
-                    {
-                        "model": r["model"],
-                        "composite": r["composite"],
-                        "norm_mean_score": r["norm_mean_score"],
-                        "playlist_precision": r["playlist_precision"],
-                        "playlist_hit_rate": r["playlist_hit_rate"],
-                        "diversity": r["diversity"],
-                        "novelty": r["novelty"],
-                    }
-                    for r in results_sorted
-                ])
-                st.session_state["tournament_scoreboard"] = scoreboard
-                st.session_state["tournament_best"] = best
-
-                best_out = best["df_out"]
-                if best_out is None or best_out.empty:
+                st.success(f"Text prompt mode: {text_model}")
+                if df_out.empty:
                     st.warning("No recommendations were generated.")
                 else:
                     st.subheader("Top recommendations")
-                    ordered = best_out.sort_values("rank", ascending=True) if "rank" in best_out.columns else best_out
+                    ordered = df_out.sort_values("rank", ascending=True) if "rank" in df_out.columns else df_out
                     for _, row in ordered.iterrows():
                         rank = int(row["rank"]) if "rank" in row else 0
                         st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
@@ -251,8 +212,114 @@ with tab_user:
                             )
                             components.html(embed_html, height=170)
                         st.divider()
-        except Exception as e:
-            st.error(str(e))
+            except Exception as e:
+                st.error(str(e))
+        else:
+            candidates = [
+                RecConfig(model_type="SBERT_COSINE", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                RecConfig(model_type="TFIDF_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                RecConfig(model_type="W2V_COSINE", alpha=0.85, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                RecConfig(model_type="BOW_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                RecConfig(model_type="JACCARD", alpha=0.7, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                RecConfig(model_type="SBERT_EUCLIDEAN", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+            ]
+
+            progress = st.progress(0, text="Running model tournament...")
+            results = []
+
+            try:
+                seed_idxs_user = rec._seed_indices(seeds_user) if seeds_user else []
+                for i, cfg in enumerate(candidates, start=1):
+                    df_out = rec.recommend(
+                        selected_genre=selected_genre_user,
+                        seeds_title_artist=seeds_user,
+                        cfg=cfg
+                    )
+                    rec_idxs = df_out["row_idx"].tolist() if "row_idx" in df_out.columns else []
+                    mean_score = float(df_out["score"].mean()) if "score" in df_out.columns and not df_out.empty else 0.0
+                    diversity = df_out["track_artist"].nunique() / len(df_out) if "track_artist" in df_out.columns and len(df_out) else 0.0
+                    novelty = _novelty(rec.df, rec_idxs)
+                    playlist_rel = _playlist_relevance(rec.df, seed_idxs_user, rec_idxs)
+
+                    # Normalize within-model scores (min-max) for fair comparison
+                    if "score" in df_out.columns and not df_out.empty:
+                        norm_scores = _normalize_minmax(df_out["score"].tolist())
+                        norm_mean = float(np.mean(norm_scores)) if norm_scores else 0.0
+                    else:
+                        norm_mean = 0.0
+
+                    # Composite: normalized sim + playlist proxy + diversity + novelty
+                    composite = (
+                        0.45 * norm_mean
+                        + 0.35 * playlist_rel["precision"]
+                        + 0.10 * diversity
+                        + 0.10 * novelty
+                    )
+
+                    results.append({
+                        "model": cfg.model_type,
+                        "df_out": df_out,
+                        "composite": composite,
+                        "norm_mean_score": norm_mean,
+                        "playlist_precision": playlist_rel["precision"],
+                        "playlist_hit_rate": playlist_rel["hit_rate"],
+                        "diversity": diversity,
+                        "novelty": novelty,
+                        "mean_score_raw": mean_score,
+                    })
+                    progress.progress(i / len(candidates), text=f"Evaluating {cfg.model_type}...")
+
+                if not results:
+                    st.warning("No recommendations were generated.")
+                else:
+                    results_sorted = sorted(results, key=lambda x: x["composite"], reverse=True)
+                    best = results_sorted[0]
+                    st.success(f"Best model: {best['model']}")
+
+                    scoreboard = pd.DataFrame([
+                        {
+                            "model": r["model"],
+                            "composite": r["composite"],
+                            "norm_mean_score": r["norm_mean_score"],
+                            "playlist_precision": r["playlist_precision"],
+                            "playlist_hit_rate": r["playlist_hit_rate"],
+                            "diversity": r["diversity"],
+                            "novelty": r["novelty"],
+                        }
+                        for r in results_sorted
+                    ])
+                    st.session_state["tournament_scoreboard"] = scoreboard
+                    st.session_state["tournament_best"] = best
+
+                    best_out = best["df_out"]
+                    if best_out is None or best_out.empty:
+                        st.warning("No recommendations were generated.")
+                    else:
+                        st.subheader("Top recommendations")
+                        ordered = best_out.sort_values("rank", ascending=True) if "rank" in best_out.columns else best_out
+                        for _, row in ordered.iterrows():
+                            rank = int(row["rank"]) if "rank" in row else 0
+                            st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
+                            st.caption(f"{row.get('playlist_genre', '')} · {row.get('playlist_subgenre', '')}")
+                            track_id = str(row.get("track_id", "")).strip()
+                            if track_id:
+                                embed_html = (
+                                    '<iframe style="border-radius:12px" '
+                                    f'src="https://open.spotify.com/embed/track/{track_id}?utm_source=generator" '
+                                    'width="100%" height="152" frameBorder="0" allowfullscreen="" '
+                                    'allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" '
+                                    'loading="lazy"></iframe>'
+                                )
+                                components.html(embed_html, height=170)
+                            st.divider()
+            except Exception as e:
+                st.error(str(e))
 
 # =========================================================
 # Recommend tab (DS)
