@@ -6,6 +6,7 @@ import numpy as np
 import plotly.express as px
 import time
 from sklearn.manifold import TSNE
+from sklearn.metrics.pairwise import cosine_similarity
 from src.recommender import Recommender, RecConfig
 from src.evaluation import (
     EvalConfig,
@@ -482,3 +483,35 @@ with tab_rec:
                 samples = df_lookup[df_lookup["track_option"].isin(seeds)]
                 if "lyrics_clean" in samples.columns:
                     st.dataframe(samples[["track_option", "lyrics_clean"]], width="stretch", hide_index=True)
+
+    st.divider()
+    st.subheader("Similarity models (comparison + subset example)")
+    st.caption("This section explains how models compare and shows a small, real calculation on your last seeds.")
+
+    comparison_rows = [
+        {"model": "Cosine (TF‑IDF / SBERT / W2V)", "what": "Angle between vectors", "pros": "Fast, strong baseline", "cons": "Scale sensitive"},
+        {"model": "Jaccard (token sets)", "what": "Overlap of tokens", "pros": "Simple + interpretable", "cons": "Ignores word order/semantics"},
+        {"model": "Euclidean (SBERT)", "what": "Distance in embedding space", "pros": "Good for dense embeddings", "cons": "Distance scale varies"},
+    ]
+    st.dataframe(pd.DataFrame(comparison_rows), width="stretch", hide_index=True)
+
+    if last_run and last_run.get("mode") == "seed_tracks":
+        seeds = last_run.get("seeds", [])
+        if len(seeds) >= 2:
+            st.subheader("Subset calculation (2 seeds)")
+            st.caption("We compute TF‑IDF Cosine and Jaccard on the two seeds (small example).")
+            seed_idxs = rec._seed_indices(seeds[:2])
+            if len(seed_idxs) == 2:
+                i, j = seed_idxs
+                tfidf_i = rec.tfidf_matrix[i]
+                tfidf_j = rec.tfidf_matrix[j]
+                cos = float(cosine_similarity(tfidf_i, tfidf_j)[0][0])
+                set_i = rec.token_sets[i]
+                set_j = rec.token_sets[j]
+                inter = len(set_i & set_j)
+                union = len(set_i) + len(set_j) - inter
+                jac = (inter / union) if union else 0.0
+                st.write(f"Seed A: **{seeds[0]}**")
+                st.write(f"Seed B: **{seeds[1]}**")
+                st.write(f"- TF‑IDF Cosine: **{cos:.3f}**")
+                st.write(f"- Jaccard: **{jac:.3f}**")
