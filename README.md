@@ -11,7 +11,7 @@ Core signals:
 - Optional association rules + audio clustering bonuses
 
 UI highlights:
-- User tab with Spotify embeds + feedback (👍/😐/👎)
+- User tab with Spotify embeds + feedback (👍/👎)
 - Model tournament in the background (picks best model per run)
 - DS Lab with tournament scoreboard, embedding map (PCA/t-SNE), latency, and debug NLP
 
