@@ -43,6 +43,19 @@ def build_ui_catalog(df: pd.DataFrame):
 
 df_ui, GENRES, DEMOS = build_ui_catalog(rec.df)
 
+def render_text_audio_contrib(row):
+    text_sim = float(row.get("text_sim", 0.0) or 0.0)
+    audio_sim = float(row.get("audio_sim", 0.0) or 0.0)
+    total = text_sim + audio_sim
+    if total <= 0:
+        st.caption("Similarity mix: text 0% · audio 0%")
+        return
+    text_pct = text_sim / total
+    audio_pct = audio_sim / total
+    st.caption(f"Similarity mix: text {text_pct:.0%} · audio {audio_pct:.0%}")
+    st.progress(text_pct, text="Text similarity")
+    st.progress(audio_pct, text="Audio similarity")
+
 tab_user, tab_rec = st.tabs(["Recommend", "DS Lab"])
 
 # =========================================================
@@ -201,6 +214,7 @@ with tab_user:
                         rank = int(row["rank"]) if "rank" in row else 0
                         st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
                         st.caption(f"{row.get('playlist_genre', '')} · {row.get('playlist_subgenre', '')}")
+                        render_text_audio_contrib(row)
                         track_id = str(row.get("track_id", "")).strip()
                         if track_id:
                             embed_html = (
@@ -217,17 +231,17 @@ with tab_user:
         else:
             candidates = [
                 RecConfig(model_type="SBERT_COSINE", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
                 RecConfig(model_type="TFIDF_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
                 RecConfig(model_type="W2V_COSINE", alpha=0.85, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
                 RecConfig(model_type="BOW_COSINE", alpha=0.9, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
                 RecConfig(model_type="JACCARD", alpha=0.7, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
                 RecConfig(model_type="SBERT_EUCLIDEAN", alpha=0.8, genre_bonus=0.02, cluster_bonus=0.02, assoc_bonus=0.05,
-                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False),
+                          max_per_artist=2, K=K_user, use_subgenre=False, use_clusters=True, use_assoc=False, auto_alpha=True),
             ]
 
             progress = st.progress(0, text="Running model tournament...")
@@ -281,6 +295,8 @@ with tab_user:
                     results_sorted = sorted(results, key=lambda x: x["composite"], reverse=True)
                     best = results_sorted[0]
                     st.success(f"Best model: {best['model']}")
+                    if seeds_user:
+                        st.caption("Auto-alpha adjusts text/audio weighting based on seed similarity.")
 
                     scoreboard = pd.DataFrame([
                         {
@@ -307,6 +323,7 @@ with tab_user:
                             rank = int(row["rank"]) if "rank" in row else 0
                             st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
                             st.caption(f"{row.get('playlist_genre', '')} · {row.get('playlist_subgenre', '')}")
+                            render_text_audio_contrib(row)
                             track_id = str(row.get("track_id", "")).strip()
                             if track_id:
                                 embed_html = (
@@ -476,6 +493,15 @@ with tab_rec:
             if "track_artist" in df_out.columns and len(df_out) > 0:
                 st.caption(f"Artist diversity: **{df_out['track_artist'].nunique()}/{len(df_out)}** unique artists")
 
+            if show_explain:
+                st.subheader("Explainability: Text vs Audio")
+                ordered = df_out.sort_values("rank", ascending=True) if "rank" in df_out.columns else df_out
+                for _, row in ordered.iterrows():
+                    rank = int(row["rank"]) if "rank" in row else 0
+                    st.markdown(f"**{rank}. {row['track_name']}** — {row['track_artist']}")
+                    render_text_audio_contrib(row)
+                st.caption("These bars show the relative similarity contribution from lyrics vs audio features.")
+
             with st.expander("Why these recommendations?"):
                 st.write(
                     "Ranking combines **lyrics similarity** and **audio-feature similarity** with a soft genre boost "
@@ -492,6 +518,7 @@ with tab_rec:
         except Exception as e:
             st.error(str(e))
 
+    show_explain = st.checkbox("Show explainability for DS recommendations", value=False)
     st.divider()
     st.subheader("Quick evaluation")
 

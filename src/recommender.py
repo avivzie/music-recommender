@@ -28,6 +28,7 @@ class RecConfig:
     use_clusters: bool = True
     use_assoc: bool = False
     filter_outliers: bool = False
+    auto_alpha: bool = False
 
 class Recommender:
     def __init__(self):
@@ -156,6 +157,21 @@ class Recommender:
         cand_idxs = neigh[0].tolist()
         return cand_idxs, text_sims
 
+    def _auto_alpha(self, seed_idxs: list[int]) -> float:
+        if len(seed_idxs) < 2:
+            return 0.8
+        # Text similarity between seeds (SBERT cosine)
+        seed_vecs = self.sbert_embeddings[seed_idxs]
+        text_sim = float(cosine_similarity(seed_vecs).mean())
+        # Audio similarity between seeds (cosine)
+        audio_vecs = self.audio_matrix[seed_idxs]
+        audio_sim = float(cosine_similarity(audio_vecs).mean())
+        denom = text_sim + audio_sim
+        if denom <= 0:
+            return 0.8
+        alpha = text_sim / denom
+        return float(np.clip(alpha, 0.2, 0.9))
+
     def _text_candidates_from_query(self, query_text: str, cfg: RecConfig):
         model = cfg.model_type.upper()
         q = clean_lyrics(query_text)
@@ -209,6 +225,9 @@ class Recommender:
         seed_idxs = self._seed_indices(seeds_title_artist)
         if len(seed_idxs) == 0:
             raise ValueError("No valid seeds found. Use format: 'track_name — artist' exactly as in dataset.")
+
+        if cfg.auto_alpha:
+            cfg = RecConfig(**{**cfg.__dict__, "alpha": self._auto_alpha(seed_idxs)})
 
         # profiles
         audio_profile = self.audio_matrix[seed_idxs].mean(axis=0, keepdims=True)
