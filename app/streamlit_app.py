@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import time
-from sklearn.manifold import TSNE
 from sklearn.metrics.pairwise import cosine_similarity
 from src.recommender import Recommender
 from src.tournament import run_seed_tournament, run_text_prompt
@@ -292,8 +291,7 @@ with tab_rec:
     with st.expander("What you’re seeing here"):
         st.markdown(
             "- **Tournament scoreboard**: models compete on the same seeds; the best composite score wins.\n"
-            "- **Run Insights**: shows what happened in the last user run (latency, success rate, embedding map).\n"
-            "- **Embedding map**: PCA/t‑SNE view of seed vs recommendation positions in SBERT space.\n"
+            "- **Run Insights**: shows what happened in the last user run (latency, success rate).\n"
             "- **Debug NLP**: shows cleaned text so you can verify preprocessing."
         )
     if "tournament_scoreboard" in st.session_state:
@@ -352,39 +350,6 @@ with tab_rec:
                     st.write(f"Avg predicted score (👍): **{np.mean(liked_scores):.2f}**")
                 if disliked_scores:
                     st.write(f"Avg predicted score (👎): **{np.mean(disliked_scores):.2f}**")
-
-        rec_idxs = last_run.get("rec_idxs", [])
-        if rec_idxs:
-            st.subheader("Embedding map (SBERT)")
-            method = st.selectbox("Projection method", ["PCA", "t-SNE"], index=0)
-            points = rec.sbert_embeddings[rec_idxs]
-            pca_df = pd.DataFrame(points, columns=[f"d{i}" for i in range(points.shape[1])])
-            pca_df["label"] = "recommendation"
-            if last_run.get("mode") == "seed_tracks":
-                seed_idxs = rec._seed_indices(last_run.get("seeds", []))
-                if seed_idxs:
-                    seed_pts = rec.sbert_embeddings[seed_idxs]
-                    seed_df = pd.DataFrame(seed_pts, columns=pca_df.columns[:-1])
-                    seed_df["label"] = "seed"
-                    pca_df = pd.concat([pca_df, seed_df], ignore_index=True)
-
-            # downsample for t-SNE
-            if method == "t-SNE" and len(pca_df) > 200:
-                pca_df = pca_df.sample(200, random_state=42).reset_index(drop=True)
-
-            X = pca_df.drop(columns=["label"]).to_numpy()
-            if method == "PCA":
-                X = X - X.mean(axis=0, keepdims=True)
-                U, S, Vt = np.linalg.svd(X, full_matrices=False)
-                coords = U[:, :2] * S[:2]
-            else:
-                perplexity = max(2, min(20, (len(X) - 1) // 3))
-                coords = TSNE(n_components=2, random_state=42, perplexity=perplexity).fit_transform(X)
-
-            pca_df["x"] = coords[:, 0]
-            pca_df["y"] = coords[:, 1]
-            fig = px.scatter(pca_df, x="x", y="y", color="label", title=f"{method} projection")
-            st.plotly_chart(fig, width="stretch")
 
         st.subheader("Latency + model comparison (latest tournament)")
         if last_run.get("mode") == "seed_tracks" and "model_latencies" in last_run:
